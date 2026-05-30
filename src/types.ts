@@ -1,0 +1,87 @@
+/**
+ * SuiDex V3 CLMM — Type definitions
+ */
+
+export interface Pool {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  feeRate: number;
+  tickSpacing: number;
+  sqrtPrice: bigint;
+  liquidity: bigint;
+  tickIndex: number;
+}
+
+export interface Position {
+  positionId: string;
+  poolId: string;
+  tickLower: number;
+  tickUpper: number;
+  liquidity: bigint;
+  feeGrowthInsideXLast: bigint;
+  feeGrowthInsideYLast: bigint;
+  tokensOwedX: bigint;
+  tokensOwedY: bigint;
+}
+
+export interface QuoteResult {
+  amountOut: bigint;
+  amountIn: bigint;
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  isXtoY: boolean;
+  feeRate: number;
+  priceImpact: number;
+  sqrtPriceAfter: bigint;
+}
+
+export interface SwapParams {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  isXtoY: boolean;
+  amountIn: bigint;
+  minAmountOut: bigint;
+  sender: string;
+}
+
+export interface AddLiquidityParams {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  tickLower: number;
+  tickUpper: number;
+  amountX: bigint;
+  amountY: bigint;
+  sender: string;
+  /** If provided, adds to existing position. Otherwise opens a new one. */
+  existingPositionId?: string;
+}
+
+export interface RemoveLiquidityParams {
+  poolId: string;
+  positionId: string;
+  tokenXType: string;
+  tokenYType: string;
+  liquidityAmount: bigint;
+  sender: string;
+  /** Close the position after removing all liquidity */
+  closePosition?: boolean;
+}
+
+export interface CollectFeesParams {
+  poolId: string;
+  positionId: string;
+  tokenXType: string;
+  tokenYType: string;
+  sender: string;
+}
+
+export interface SuiDexSDKOptions<Name = 'suidex'> {
+  name?: Name;
+  /** Override package IDs (for testnet or custom deployments) */
+  packageId?: string;
+  versionId?: string;
+}
