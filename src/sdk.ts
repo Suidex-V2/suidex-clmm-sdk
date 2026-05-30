@@ -11,7 +11,7 @@
  */
 
 import type { ClientWithCoreApi } from '@mysten/sui/client';
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
 import { MAINNET, MIN_SQRT_PRICE, MAX_SQRT_PRICE, Q64 } from './constants.js';
 import { tickToSqrtPrice } from './math.js';
 import type {
@@ -176,14 +176,13 @@ export class SuiDexCLMMClient {
       const inputType = isXtoY ? tokenXType : tokenYType;
       const outputType = isXtoY ? tokenYType : tokenXType;
 
-      const tx = new Transaction();
-      tx.setSender(sender);
+      const tx = this.#newTx(sender);
 
-      // Prepare input coin
+      // Prepare input coin — coinWithBalance handles both coin objects + address balances (SIP-58)
       const isSui = inputType.endsWith('::sui::SUI');
       const inputCoin = isSui
         ? tx.splitCoins(tx.gas, [tx.pure.u64(amountIn)])
-        : tx.splitCoins(tx.object('coin'), [tx.pure.u64(amountIn)]);
+        : coinWithBalance({ type: inputType, balance: amountIn });
 
       // Convert to balance for flash_swap
       const inputBal = tx.moveCall({
@@ -236,8 +235,7 @@ export class SuiDexCLMMClient {
     /** Build an add_liquidity transaction. Opens a new position if no existingPositionId. */
     addLiquidity: (params: AddLiquidityParams): Transaction => {
       const { poolId, tokenXType, tokenYType, tickLower, tickUpper, amountX, amountY, sender, existingPositionId } = params;
-      const tx = new Transaction();
-      tx.setSender(sender);
+      const tx = this.#newTx(sender);
 
       // Open position or use existing
       let positionArg;
@@ -256,12 +254,12 @@ export class SuiDexCLMMClient {
         });
       }
 
-      // Prepare coins
+      // Prepare coins — coinWithBalance handles coin objects + address balances (SIP-58)
       const coinX = amountX > 0n
-        ? (tokenXType.endsWith('::sui::SUI') ? tx.splitCoins(tx.gas, [tx.pure.u64(amountX)]) : tx.splitCoins(tx.object('coinX'), [tx.pure.u64(amountX)]))
+        ? (tokenXType.endsWith('::sui::SUI') ? tx.splitCoins(tx.gas, [tx.pure.u64(amountX)]) : coinWithBalance({ type: tokenXType, balance: amountX }))
         : tx.moveCall({ target: '0x2::coin::zero', typeArguments: [tokenXType] });
       const coinY = amountY > 0n
-        ? (tokenYType.endsWith('::sui::SUI') ? tx.splitCoins(tx.gas, [tx.pure.u64(amountY)]) : tx.splitCoins(tx.object('coinY'), [tx.pure.u64(amountY)]))
+        ? (tokenYType.endsWith('::sui::SUI') ? tx.splitCoins(tx.gas, [tx.pure.u64(amountY)]) : coinWithBalance({ type: tokenYType, balance: amountY }))
         : tx.moveCall({ target: '0x2::coin::zero', typeArguments: [tokenYType] });
 
       // add_liquidity
@@ -285,8 +283,7 @@ export class SuiDexCLMMClient {
     /** Build a remove_liquidity transaction. */
     removeLiquidity: (params: RemoveLiquidityParams): Transaction => {
       const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition } = params;
-      const tx = new Transaction();
-      tx.setSender(sender);
+      const tx = this.#newTx(sender);
 
       const [coinX, coinY] = tx.moveCall({
         target: `${this.#pkg}::liquidity::remove_liquidity`,
@@ -315,8 +312,7 @@ export class SuiDexCLMMClient {
     /** Build a collect_fees transaction. */
     collectFees: (params: CollectFeesParams): Transaction => {
       const { poolId, positionId, tokenXType, tokenYType, sender } = params;
-      const tx = new Transaction();
-      tx.setSender(sender);
+      const tx = this.#newTx(sender);
 
       const [feeX, feeY] = tx.moveCall({
         target: `${this.#pkg}::collect::fee`,
@@ -332,6 +328,13 @@ export class SuiDexCLMMClient {
   };
 
   // ─── Internal Helpers ────────────────────────────────────────
+
+  #newTx(sender: string): Transaction {
+    const tx = new Transaction();
+    tx.setSender(sender);
+    tx.setExpiration({ None: true }); // Wallet compat: older wallets don't support ValidDuring
+    return tx;
+  }
 
   #makeI32(tx: Transaction, tick: number) {
     if (tick >= 0) {
