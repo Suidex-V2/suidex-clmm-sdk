@@ -23,7 +23,7 @@ Built on the [Sui TypeScript SDK](https://sdk.mystenlabs.com/sui) using the offi
 - **CLMM math** — Tick/price conversions, position amount calculations, liquidity math (Q64 fixed-point)
 - **SIP-58 compatible** — Uses `coinWithBalance` for automatic coin object + address balance resolution
 - **Transport agnostic** — Works with gRPC, GraphQL, or any Sui client
-- **Zero dependencies** — Only `@mysten/sui` as a peer dependency
+- **Minimal dependencies** — Only `@mysten/sui` as a peer dependency, zero additional runtime deps
 
 ## Installation
 
@@ -209,6 +209,18 @@ All amounts in the SDK use raw on-chain base units (the smallest indivisible uni
 
 Check each token's decimals via `suix_getCoinMetadata`. The SDK does not assume decimals for any token.
 
+### Slippage protection
+
+All transaction builders accept minimum output/amount parameters for slippage protection. **Always set these in production.** Passing `0n` disables slippage checks — the transaction will succeed regardless of price movement. This is only appropriate for testing or simulations.
+
+```typescript
+// PRODUCTION: derive min from quote
+const minOut = quote.amountOut - (quote.amountOut * 100n) / 10000n; // 1% slippage
+
+// TESTING ONLY: no slippage check
+const minOut = 0n;
+```
+
 ### Fee rate encoding
 
 Fee rates are stored as integers where `1_000_000 = 100%`:
@@ -222,6 +234,10 @@ Fee rates are stored as integers where `1_000_000 = 100%`:
 ### Price representation
 
 SuiDex V3 uses **Q64 fixed-point** sqrt prices (2^64 scale factor), different from Uniswap V3's Q96. The `sqrtPriceToPrice()` function handles the conversion to human-readable prices — pass the correct decimals for each token.
+
+### Price impact
+
+The `priceImpact` field returned by `getQuote()` is an **estimate** derived from comparing spot price output to actual simulated output. It is useful for UI display and route selection, but should not be treated as an exact value. It does not account for fee structure granularity or multi-tick crossing edge cases.
 
 ### Swap mechanism
 
@@ -258,7 +274,7 @@ const client = new SuiGrpcClient({ ... }).$extend(
 
 SuiDex V3 CLMM is an audited, MIT-licensed concentrated liquidity protocol on Sui.
 
-- **Audits**: [SpyWolf](https://github.com/AuditReports) | [HackenProof](https://hackenproof.com)
+- **Audit**: [SpyWolf Security Audit](https://github.com/AuditReports/Spywolf) — 0 critical, 0 high, 1 medium (JIT protection, resolved). Covers Move contracts at package `0xb5f529c1dcda6580a61bf7ee9fbd524b50be62f11044d137c8202c8cbace9e56`. The SDK itself wraps audited on-chain functions; the SDK TypeScript code was not in audit scope.
 - **Contract source**: [suidex-v3-clmm](https://github.com/Suidex-V2/suidex-v3-clmm)
 
 ## License

@@ -33,6 +33,7 @@ export interface QuoteResult {
   tokenYType: string;
   isXtoY: boolean;
   feeRate: number;
+  /** Estimated price impact (%). Derived from spot vs actual output — treat as directional, not exact. */
   priceImpact: number;
   sqrtPriceAfter: bigint;
 }

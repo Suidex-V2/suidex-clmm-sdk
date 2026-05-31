@@ -118,24 +118,13 @@ export class SuiDexCLMMClient {
         include: { commandResults: true },
       });
 
-      // Parse SwapState BCS: [amount_specified_remaining(u64), amount_calculated(u64), sqrt_price(u128)]
       const rv = (result as any)?.commandResults?.[0]?.returnValues?.[0];
       if (!rv) throw new Error('Quote simulation returned no results');
-      const bcsBytes: Uint8Array | number[] = rv.bcs ?? [];
+      const { amountOut, sqrtPriceAfter } = SuiDexCLMMClient.#parseSwapResult(rv.bcs ?? []);
 
-      let amountOut = 0n;
-      for (let i = 0; i < 8; i++) {
-        const b = bcsBytes[i + 8];
-        if (b !== undefined) amountOut += BigInt(b) << BigInt(i * 8);
-      }
-
-      let sqrtPriceAfter = 0n;
-      for (let i = 0; i < 16; i++) {
-        const b = bcsBytes[i + 16];
-        if (b !== undefined) sqrtPriceAfter += BigInt(b) << BigInt(i * 8);
-      }
-
-      // Price impact: compare actual vs spot output
+      // Estimated price impact: compares spot price output vs actual output.
+      // This is an approximation — it does not account for fee structure or
+      // multi-tick crossing granularity. Treat as directional, not exact.
       let priceImpact = 0;
       const pool = await this.getPool(poolId);
       const sqrtPrice = pool.sqrtPrice;
@@ -174,7 +163,6 @@ export class SuiDexCLMMClient {
       const { poolId, tokenXType, tokenYType, isXtoY, amountIn, minAmountOut, sender } = params;
       const sqrtLimit = isXtoY ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n;
       const inputType = isXtoY ? tokenXType : tokenYType;
-      const outputType = isXtoY ? tokenYType : tokenXType;
 
       const tx = this.#newTx(sender);
 
@@ -338,6 +326,24 @@ export class SuiDexCLMMClient {
   };
 
   // ─── Internal Helpers ────────────────────────────────────────
+
+  /**
+   * Parse compute_swap_result BCS return value.
+   * Layout: [amount_specified_remaining(u64), amount_calculated(u64), sqrt_price(u128)]
+   */
+  static #parseSwapResult(bcsBytes: Uint8Array | number[]): { amountOut: bigint; sqrtPriceAfter: bigint } {
+    let amountOut = 0n;
+    for (let i = 0; i < 8; i++) {
+      const b = bcsBytes[i + 8];
+      if (b !== undefined) amountOut += BigInt(b) << BigInt(i * 8);
+    }
+    let sqrtPriceAfter = 0n;
+    for (let i = 0; i < 16; i++) {
+      const b = bcsBytes[i + 16];
+      if (b !== undefined) sqrtPriceAfter += BigInt(b) << BigInt(i * 8);
+    }
+    return { amountOut, sqrtPriceAfter };
+  }
 
   #newTx(sender: string): Transaction {
     const tx = new Transaction();
