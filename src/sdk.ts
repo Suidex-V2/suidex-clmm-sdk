@@ -215,6 +215,11 @@ export class SuiDexCLMMClient {
           arguments: [tx.object(poolId), receipt!, inputBal!, zeroBal!, tx.object(this.#ver)],
         });
         tx.moveCall({ target: '0x2::balance::destroy_zero', typeArguments: [tokenXType], arguments: [balX!] });
+        // Enforce minAmountOut: split then rejoin — aborts if output < minimum
+        if (minAmountOut > 0n) {
+          const check = tx.moveCall({ target: '0x2::balance::split', typeArguments: [tokenYType], arguments: [balY!, tx.pure.u64(minAmountOut)] });
+          tx.moveCall({ target: '0x2::balance::join', typeArguments: [tokenYType], arguments: [balY!, check] });
+        }
         const outCoin = tx.moveCall({ target: '0x2::coin::from_balance', typeArguments: [tokenYType], arguments: [balY!] });
         tx.transferObjects([outCoin], tx.pure.address(sender));
       } else {
@@ -225,6 +230,11 @@ export class SuiDexCLMMClient {
           arguments: [tx.object(poolId), receipt!, zeroBal!, inputBal!, tx.object(this.#ver)],
         });
         tx.moveCall({ target: '0x2::balance::destroy_zero', typeArguments: [tokenYType], arguments: [balY!] });
+        // Enforce minAmountOut: split then rejoin — aborts if output < minimum
+        if (minAmountOut > 0n) {
+          const check = tx.moveCall({ target: '0x2::balance::split', typeArguments: [tokenXType], arguments: [balX!, tx.pure.u64(minAmountOut)] });
+          tx.moveCall({ target: '0x2::balance::join', typeArguments: [tokenXType], arguments: [balX!, check] });
+        }
         const outCoin = tx.moveCall({ target: '0x2::coin::from_balance', typeArguments: [tokenXType], arguments: [balX!] });
         tx.transferObjects([outCoin], tx.pure.address(sender));
       }
@@ -234,7 +244,7 @@ export class SuiDexCLMMClient {
 
     /** Build an add_liquidity transaction. Opens a new position if no existingPositionId. */
     addLiquidity: (params: AddLiquidityParams): Transaction => {
-      const { poolId, tokenXType, tokenYType, tickLower, tickUpper, amountX, amountY, sender, existingPositionId } = params;
+      const { poolId, tokenXType, tokenYType, tickLower, tickUpper, amountX, amountY, sender, existingPositionId, minAmountX = 0n, minAmountY = 0n } = params;
       const tx = this.#newTx(sender);
 
       // Open position or use existing
@@ -268,7 +278,7 @@ export class SuiDexCLMMClient {
         typeArguments: [tokenXType, tokenYType],
         arguments: [
           tx.object(poolId), positionArg, coinX, coinY,
-          tx.pure.u64(0), tx.pure.u64(0), // min amounts (contract handles ratio)
+          tx.pure.u64(minAmountX), tx.pure.u64(minAmountY),
           tx.object(this.#clk), tx.object(this.#ver),
         ],
       });
@@ -282,7 +292,7 @@ export class SuiDexCLMMClient {
 
     /** Build a remove_liquidity transaction. */
     removeLiquidity: (params: RemoveLiquidityParams): Transaction => {
-      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition } = params;
+      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition, minAmountX = 0n, minAmountY = 0n } = params;
       const tx = this.#newTx(sender);
 
       const [coinX, coinY] = tx.moveCall({
@@ -291,7 +301,7 @@ export class SuiDexCLMMClient {
         arguments: [
           tx.object(poolId), tx.object(positionId),
           tx.pure.u128(liquidityAmount),
-          tx.pure.u64(0), tx.pure.u64(0),
+          tx.pure.u64(minAmountX), tx.pure.u64(minAmountY),
           tx.object(this.#clk), tx.object(this.#ver),
         ],
       });

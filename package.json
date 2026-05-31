@@ -14,6 +14,7 @@
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc",
+    "test": "tsx --test test/sdk.test.ts",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@mysten/sui": "^2.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   },
   "license": "MIT",

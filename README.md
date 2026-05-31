@@ -62,13 +62,26 @@ console.log('Fee rate:', quote.feeRate);        // e.g. 3000 (= 0.30%)
 ### Build a Swap Transaction
 
 ```typescript
+// Get a quote first, then apply slippage tolerance
+const quote = await client.suidex.view.getQuote({
+  poolId: '0x02c8...0629',
+  tokenXType: '0x2::sui::SUI',
+  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
+  isXtoY: true,
+  amountIn: 1_000_000_000n,
+});
+
+// 1% slippage tolerance
+const slippageBps = 100n;
+const minAmountOut = quote.amountOut - (quote.amountOut * slippageBps) / 10000n;
+
 const tx = client.suidex.tx.swap({
   poolId: '0x02c8...0629',
   tokenXType: '0x2::sui::SUI',
   tokenYType: '0x...::victory_token::VICTORY_TOKEN',
   isXtoY: true,
   amountIn: 1_000_000_000n,
-  minAmountOut: 0n,
+  minAmountOut, // TX aborts if output is less than this
   sender: '0xYourAddress',
 });
 
@@ -94,14 +107,21 @@ console.log('Current Tick:', pool.tickIndex);
 
 ```typescript
 // Open a new position and add liquidity
+const amountX = 1_000_000_000n; // 1 SUI
+const amountY = 500_000_000n;   // 500 VICTORY
+
+// 1% slippage tolerance on deposited amounts
+const slippageBps = 100n;
 const tx = client.suidex.tx.addLiquidity({
   poolId: '0x02c8...0629',
   tokenXType: '0x2::sui::SUI',
   tokenYType: '0x...::victory_token::VICTORY_TOKEN',
   tickLower: 4200,
   tickUpper: 5400,
-  amountX: 1_000_000_000n, // 1 SUI
-  amountY: 500_000_000n,   // 500 VICTORY (6 decimals)
+  amountX,
+  amountY,
+  minAmountX: amountX - (amountX * slippageBps) / 10000n,
+  minAmountY: amountY - (amountY * slippageBps) / 10000n,
   sender: '0xYourAddress',
 });
 
@@ -121,6 +141,8 @@ const tx = client.suidex.tx.removeLiquidity({
   tokenXType: '0x2::sui::SUI',
   tokenYType: '0x...::victory_token::VICTORY_TOKEN',
   liquidityAmount: 1_000_000n,
+  minAmountX: 900_000_000n, // Minimum token X to receive
+  minAmountY: 450_000_000n, // Minimum token Y to receive
   sender: '0xYourAddress',
   closePosition: false, // Set true to close the position entirely
 });

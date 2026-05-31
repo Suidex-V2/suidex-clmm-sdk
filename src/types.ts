@@ -58,6 +58,10 @@ export interface AddLiquidityParams {
   sender: string;
   /** If provided, adds to existing position. Otherwise opens a new one. */
   existingPositionId?: string;
+  /** Minimum token X actually deposited — aborts TX if slippage exceeds tolerance. Defaults to 0. */
+  minAmountX?: bigint;
+  /** Minimum token Y actually deposited — aborts TX if slippage exceeds tolerance. Defaults to 0. */
+  minAmountY?: bigint;
 }
 
 export interface RemoveLiquidityParams {
@@ -69,6 +73,10 @@ export interface RemoveLiquidityParams {
   sender: string;
   /** Close the position after removing all liquidity */
   closePosition?: boolean;
+  /** Minimum token X received — aborts TX if slippage exceeds tolerance. Defaults to 0. */
+  minAmountX?: bigint;
+  /** Minimum token Y received — aborts TX if slippage exceeds tolerance. Defaults to 0. */
+  minAmountY?: bigint;
 }
 
 export interface CollectFeesParams {
