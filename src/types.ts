@@ -72,8 +72,10 @@ export interface RemoveLiquidityParams {
   tokenYType: string;
   liquidityAmount: bigint;
   sender: string;
-  /** Close the position after removing all liquidity */
+  /** Close the position after removing all liquidity. Rewards must be collected first — pass rewardCoinType if the pool has incentives. */
   closePosition?: boolean;
+  /** If closing a position on an incentivized pool, provide the reward coin type to auto-collect before close. */
+  rewardCoinType?: string;
   /** Minimum token X received — aborts TX if slippage exceeds tolerance. Defaults to 0. */
   minAmountX?: bigint;
   /** Minimum token Y received — aborts TX if slippage exceeds tolerance. Defaults to 0. */
@@ -85,6 +87,16 @@ export interface CollectFeesParams {
   positionId: string;
   tokenXType: string;
   tokenYType: string;
+  sender: string;
+}
+
+export interface CollectRewardParams {
+  poolId: string;
+  positionId: string;
+  tokenXType: string;
+  tokenYType: string;
+  /** The coin type of the reward token (e.g. VICTORY_TOKEN type) */
+  rewardCoinType: string;
   sender: string;
 }
 

@@ -160,6 +160,23 @@ const tx = client.suidex.tx.collectFees({
 });
 ```
 
+### Collect Incentive Rewards
+
+For pools with VICTORY or other incentive rewards:
+
+```typescript
+const tx = client.suidex.tx.collectReward({
+  poolId: '0x02c8...0629',
+  positionId: '0xPositionId',
+  tokenXType: '0x2::sui::SUI',
+  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
+  rewardCoinType: '0x...::victory_token::VICTORY_TOKEN', // The reward token type
+  sender: '0xYourAddress',
+});
+```
+
+> **Note:** Incentive rewards must be collected before a position can be closed. When using `removeLiquidity` with `closePosition: true`, pass `rewardCoinType` to auto-collect rewards before closing.
+
 ## Math Utilities
 
 The SDK exports CLMM math functions for working with ticks, prices, and positions.

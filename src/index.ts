@@ -29,6 +29,7 @@ export type {
   AddLiquidityParams,
   RemoveLiquidityParams,
   CollectFeesParams,
+  CollectRewardParams,
   SuiDexSDKOptions,
 } from './types.js';
 

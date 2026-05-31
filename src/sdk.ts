@@ -17,7 +17,7 @@ import { tickToSqrtPrice } from './math.js';
 import type {
   Pool, QuoteResult, SwapParams,
   AddLiquidityParams, RemoveLiquidityParams, CollectFeesParams,
-  SuiDexSDKOptions,
+  CollectRewardParams, SuiDexSDKOptions,
 } from './types.js';
 
 // ─── Client Extension Factory ────────────────────────────────────
@@ -278,9 +278,9 @@ export class SuiDexCLMMClient {
       return tx;
     },
 
-    /** Build a remove_liquidity transaction. */
+    /** Build a remove_liquidity transaction. When closing a position on an incentivized pool, pass rewardCoinType to auto-collect rewards first. */
     removeLiquidity: (params: RemoveLiquidityParams): Transaction => {
-      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition, minAmountX = 0n, minAmountY = 0n } = params;
+      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition, rewardCoinType, minAmountX = 0n, minAmountY = 0n } = params;
       const tx = this.#newTx(sender);
 
       const [coinX, coinY] = tx.moveCall({
@@ -298,6 +298,25 @@ export class SuiDexCLMMClient {
       tx.transferObjects([coinY], tx.pure.address(sender));
 
       if (closePosition) {
+        // Collect fees before close
+        const [feeX, feeY] = tx.moveCall({
+          target: `${this.#pkg}::collect::fee`,
+          typeArguments: [tokenXType, tokenYType],
+          arguments: [tx.object(poolId), tx.object(positionId), tx.object(this.#clk), tx.object(this.#ver)],
+        });
+        tx.transferObjects([feeX], tx.pure.address(sender));
+        tx.transferObjects([feeY], tx.pure.address(sender));
+
+        // Collect incentive rewards before close (required — position cannot close with unclaimed rewards)
+        if (rewardCoinType) {
+          const rewardCoin = tx.moveCall({
+            target: `${this.#pkg}::collect::reward`,
+            typeArguments: [tokenXType, tokenYType, rewardCoinType],
+            arguments: [tx.object(poolId), tx.object(positionId), tx.object(this.#clk), tx.object(this.#ver)],
+          });
+          tx.transferObjects([rewardCoin], tx.pure.address(sender));
+        }
+
         tx.moveCall({
           target: `${this.#pkg}::liquidity::close_position`,
           arguments: [tx.object(positionId), tx.object(this.#ver)],
@@ -320,6 +339,22 @@ export class SuiDexCLMMClient {
 
       tx.transferObjects([feeX], tx.pure.address(sender));
       tx.transferObjects([feeY], tx.pure.address(sender));
+
+      return tx;
+    },
+
+    /** Build a collect_reward transaction. Claims incentive rewards from a position. */
+    collectReward: (params: CollectRewardParams): Transaction => {
+      const { poolId, positionId, tokenXType, tokenYType, rewardCoinType, sender } = params;
+      const tx = this.#newTx(sender);
+
+      const rewardCoin = tx.moveCall({
+        target: `${this.#pkg}::collect::reward`,
+        typeArguments: [tokenXType, tokenYType, rewardCoinType],
+        arguments: [tx.object(poolId), tx.object(positionId), tx.object(this.#clk), tx.object(this.#ver)],
+      });
+
+      tx.transferObjects([rewardCoin], tx.pure.address(sender));
 
       return tx;
     },
