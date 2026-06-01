@@ -199,14 +199,14 @@ export class SuiDexCLMMClient {
   static estimateFeeAPR(params: {
     volume24hUsd: number;
     feeRate: number; // e.g. 3000 = 0.30%
-    positionLiqidity: bigint;
+    positionLiquidity: bigint;
     poolLiquidity: bigint;
     positionValueUsd: number;
   }): number {
-    const { volume24hUsd, feeRate, positionLiqidity, poolLiquidity, positionValueUsd } = params;
+    const { volume24hUsd, feeRate, positionLiquidity, poolLiquidity, positionValueUsd } = params;
     if (positionValueUsd === 0 || poolLiquidity === 0n) return 0;
     const feePercent = feeRate / 1_000_000;
-    const share = Number(positionLiqidity) / Number(poolLiquidity);
+    const share = Number(positionLiquidity) / Number(poolLiquidity);
     const dailyFees = volume24hUsd * feePercent * share;
     return (dailyFees / positionValueUsd) * 365 * 100; // percent
   }
