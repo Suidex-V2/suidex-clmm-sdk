@@ -401,6 +401,161 @@ async function testMathWithRealData(pool: Pool, pos: Position) {
   assert(lowerPrice < price && price < upperPrice, `Current price ${price.toFixed(4)} in position range`);
 }
 
+// ─── Phase 2 Tests ───────────────────────────────────────────────
+
+async function testListPositions() {
+  console.log('\n=== 14. listPositions ===');
+
+  // With no positions, should return empty array
+  const positions = await client.suidex.listPositions(WALLET);
+  assert(Array.isArray(positions), `Returns array (${positions.length} positions)`);
+  // Wallet should have 0 positions after cleanup
+  assert(positions.length === 0, `No positions after cleanup: ${positions.length}`);
+
+  // Open a position to test with
+  const pool = await client.suidex.getPool(SUI_VICTORY_POOL);
+  const spacing = pool.tickSpacing;
+  const tickLower = Math.floor((pool.tickIndex - spacing * 3) / spacing) * spacing;
+  const tickUpper = Math.ceil((pool.tickIndex + spacing * 3) / spacing) * spacing;
+
+  // Need VICTORY — swap first
+  const swapTx = client.suidex.tx.swap({
+    poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    isXtoY: true, amountIn: 20_000_000n, minAmountOut: 0n, sender: WALLET,
+  });
+  await execute(swapTx);
+  await sleep(2000);
+
+  const addTx = client.suidex.tx.addLiquidity({
+    poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    tickLower, tickUpper, amountX: 10_000_000n, amountY: 10_000_000n,
+    minAmountX: 0n, minAmountY: 0n, sender: WALLET, tickSpacing: spacing,
+  });
+  await execute(addTx);
+  await sleep(2000);
+
+  const positionsAfter = await client.suidex.listPositions(WALLET);
+  assert(positionsAfter.length === 1, `Found 1 position after open: ${positionsAfter.length}`);
+  if (positionsAfter.length > 0) {
+    const p = positionsAfter[0];
+    assert(p.poolId === SUI_VICTORY_POOL, `poolId matches`);
+    assert(p.liquidity > 0n, `liquidity: ${p.liquidity}`);
+    assert(p.tickLower === tickLower, `tickLower: ${p.tickLower}`);
+  }
+
+  // Clean up: close position
+  if (positionsAfter.length > 0) {
+    await sleep(2000);
+    const pos = positionsAfter[0];
+    const rmTx = client.suidex.tx.removeLiquidity({
+      poolId: SUI_VICTORY_POOL, positionId: pos.positionId,
+      tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+      liquidityAmount: pos.liquidity, minAmountX: 0n, minAmountY: 0n,
+      sender: WALLET, closePosition: true, rewardCoinTypes: [VICTORY_TYPE],
+    });
+    await execute(rmTx);
+  }
+}
+
+async function testPreSwap() {
+  console.log('\n=== 15. view.preSwap (multi-pool quote) ===');
+
+  // Single-hop should match getQuote
+  const quote = await client.suidex.view.getQuote({
+    poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    isXtoY: true, amountIn: 100_000_000n,
+  });
+
+  const preSwapOut = await client.suidex.view.preSwap({
+    route: [{ poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE, isXtoY: true }],
+    amountIn: 100_000_000n,
+  });
+
+  assert(preSwapOut > 0n, `preSwap output: ${preSwapOut}`);
+  // Should match getQuote exactly (same simulation)
+  const diff = preSwapOut > quote.amountOut ? preSwapOut - quote.amountOut : quote.amountOut - preSwapOut;
+  assert(diff === 0n, `preSwap matches getQuote: ${preSwapOut} vs ${quote.amountOut}`);
+
+  // Empty route returns 0
+  const emptyOut = await client.suidex.view.preSwap({ route: [], amountIn: 100_000_000n });
+  assert(emptyOut === 0n, `Empty route: ${emptyOut}`);
+}
+
+async function testCollectAllRewards(pool: Pool) {
+  console.log('\n=== 16. tx.collectAllRewards ===');
+
+  // Open a quick position
+  const spacing = pool.tickSpacing;
+  const tickLower = Math.floor((pool.tickIndex - spacing * 3) / spacing) * spacing;
+  const tickUpper = Math.ceil((pool.tickIndex + spacing * 3) / spacing) * spacing;
+
+  const addTx = client.suidex.tx.addLiquidity({
+    poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    tickLower, tickUpper, amountX: 10_000_000n, amountY: 10_000_000n,
+    minAmountX: 0n, minAmountY: 0n, sender: WALLET, tickSpacing: spacing,
+  });
+  await execute(addTx);
+  await sleep(2000);
+
+  const positions = await client.suidex.listPositions(WALLET);
+  assert(positions.length > 0, `Has position for collectAllRewards`);
+
+  if (positions.length > 0) {
+    const pos = positions[0];
+    const tx = client.suidex.tx.collectAllRewards({
+      poolId: SUI_VICTORY_POOL, positionId: pos.positionId,
+      tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+      rewardCoinTypes: [VICTORY_TYPE],
+      sender: WALLET,
+    });
+    const { digest } = await execute(tx);
+    assert(true, `collectAllRewards executed: ${digest.slice(0, 16)}...`);
+
+    // Clean up
+    await sleep(3000);
+    const rmTx = client.suidex.tx.removeLiquidity({
+      poolId: SUI_VICTORY_POOL, positionId: pos.positionId,
+      tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+      liquidityAmount: pos.liquidity, minAmountX: 0n, minAmountY: 0n,
+      sender: WALLET, closePosition: true, rewardCoinTypes: [VICTORY_TYPE],
+    });
+    await execute(rmTx);
+  }
+}
+
+async function testFlashLoan(pool: Pool) {
+  console.log('\n=== 17. tx.flashLoan ===');
+
+  // Build a flash loan that borrows and immediately repays (no arb logic)
+  const { tx, balanceX, balanceY, receipt } = client.suidex.tx.flashLoan({
+    poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    amountX: 1_000_000n, // borrow 0.001 SUI
+    amountY: 0n,
+    sender: WALLET,
+  });
+  assert(tx !== null, 'flashLoan TX created');
+
+  // Must repay with fees — for 0 borrow on Y + small X borrow, need to provide fee on X
+  // flash_receipt_debts tells us what we owe
+  // For simplicity, just convert the borrowed balance back and add fee from gas
+  const feeX = tx.splitCoins(tx.gas, [tx.pure.u64(10_000n)]); // small fee buffer from SUI
+  const feeBal = tx.moveCall({ target: '0x2::coin::into_balance', typeArguments: [SUI_TYPE], arguments: [feeX] });
+  tx.moveCall({ target: '0x2::balance::join', typeArguments: [SUI_TYPE], arguments: [balanceX, feeBal] });
+
+  client.suidex.tx.repayFlashLoan({
+    tx, poolId: SUI_VICTORY_POOL, tokenXType: SUI_TYPE, tokenYType: VICTORY_TYPE,
+    receipt, balanceX, balanceY,
+  });
+
+  try {
+    const { digest } = await execute(tx);
+    assert(true, `flashLoan + repay executed: ${digest.slice(0, 16)}...`);
+  } catch (e: any) {
+    // Flash loan fee might be slightly different — check the error
+    assert(false, `flashLoan failed: ${e.message.slice(0, 80)}`);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────
 
 async function main() {
@@ -454,6 +609,12 @@ async function main() {
 
     // 13. Math with real data (uses pool + pos captured earlier)
     await testMathWithRealData(pool, pos);
+
+    // 14. Phase 2: listPositions, preSwap, collectAllRewards, flashLoan
+    await testListPositions();
+    await testPreSwap();
+    await testCollectAllRewards(pool);
+    await testFlashLoan(pool);
 
   } catch (err: any) {
     console.error('\nFATAL ERROR:', err.message ?? err);

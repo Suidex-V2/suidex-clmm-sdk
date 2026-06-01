@@ -103,6 +103,45 @@ export class SuiDexCLMMClient {
     };
   }
 
+  /** List all CLMM positions owned by a wallet address. */
+  async listPositions(owner: string): Promise<Position[]> {
+    const positionType = `${MAINNET.ORIGINAL_PACKAGE_ID}::position::Position`;
+    const positions: Position[] = [];
+    let cursor: string | null | undefined;
+
+    while (true) {
+      const result = await this.#client.core.listOwnedObjects({
+        owner,
+        type: positionType,
+        include: { json: true },
+        limit: 50,
+        ...(cursor ? { cursor } : {}),
+      }) as any;
+
+      const objects = result?.objects ?? result?.data ?? [];
+      for (const obj of objects) {
+        const json = obj?.json ?? obj?.data?.content?.fields;
+        if (!json) continue;
+        positions.push({
+          positionId: obj.objectId ?? obj?.data?.objectId ?? '',
+          poolId: json.pool_id ?? '',
+          tickLower: this.#parseI32(json.tick_lower_index),
+          tickUpper: this.#parseI32(json.tick_upper_index),
+          liquidity: BigInt(json.liquidity ?? '0'),
+          feeGrowthInsideXLast: BigInt(json.fee_growth_inside_x_last ?? '0'),
+          feeGrowthInsideYLast: BigInt(json.fee_growth_inside_y_last ?? '0'),
+          tokensOwedX: BigInt(json.tokens_owed_x ?? json.owed_coin_x ?? '0'),
+          tokensOwedY: BigInt(json.tokens_owed_y ?? json.owed_coin_y ?? '0'),
+        });
+      }
+
+      cursor = result?.cursor ?? result?.nextCursor;
+      if (!cursor) break;
+    }
+
+    return positions;
+  }
+
   // ─── View Methods (on-chain simulation) ──────────────────────
 
   view = {
@@ -173,6 +212,58 @@ export class SuiDexCLMMClient {
         sqrtPriceAfter,
         feeAmount,
       };
+    },
+
+    /**
+     * Multi-pool chained quote. Simulates a swap through multiple pools in sequence.
+     * Returns the final output amount. Useful for routing (A→B→C).
+     */
+    preSwap: async (params: {
+      route: { poolId: string; tokenXType: string; tokenYType: string; isXtoY: boolean }[];
+      amountIn: bigint;
+    }): Promise<bigint> => {
+      const { route, amountIn } = params;
+      if (route.length === 0) return 0n;
+
+      const tx = new Transaction();
+      tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
+
+      let inputAmount = tx.pure.u64(amountIn);
+
+      for (const hop of route) {
+        const sqrtLimit = hop.isXtoY ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n;
+        const swapResult = tx.moveCall({
+          target: `${this.#pkg}::trade::compute_swap_result`,
+          typeArguments: [hop.tokenXType, hop.tokenYType],
+          arguments: [
+            tx.object(hop.poolId),
+            tx.pure.bool(hop.isXtoY),
+            tx.pure.bool(true), // exact_input
+            tx.pure.u128(sqrtLimit),
+            inputAmount,
+          ],
+        });
+        // get_state_amount_calculated returns the output of this hop
+        inputAmount = tx.moveCall({
+          target: `${this.#pkg}::trade::get_state_amount_calculated`,
+          arguments: [swapResult],
+        });
+      }
+
+      const result = await this.#client.core.simulateTransaction({
+        transaction: tx,
+        checksEnabled: false,
+        include: { commandResults: true },
+      });
+
+      // The last command's return value is the final output amount
+      const cmdResults = (result as any)?.commandResults ?? [];
+      const lastIdx = cmdResults.length - 1;
+      const rv = cmdResults[lastIdx]?.returnValues?.[0];
+      if (!rv) return 0n;
+
+      const bytes = rv.bcs instanceof Uint8Array ? rv.bcs : new Uint8Array(rv.bcs ?? []);
+      return BigInt(bcs.u64().parse(bytes));
     },
   };
 
@@ -401,6 +492,203 @@ export class SuiDexCLMMClient {
       });
 
       tx.transferObjects([rewardCoin], tx.pure.address(sender));
+
+      return tx;
+    },
+
+    /** Collect ALL reward types from a position in one transaction. */
+    collectAllRewards: (params: {
+      poolId: string;
+      positionId: string;
+      tokenXType: string;
+      tokenYType: string;
+      rewardCoinTypes: string[];
+      sender: string;
+    }): Transaction => {
+      const { poolId, positionId, tokenXType, tokenYType, rewardCoinTypes, sender } = params;
+      const tx = this.#newTx(sender);
+
+      for (const rewardType of rewardCoinTypes) {
+        const rewardCoin = tx.moveCall({
+          target: `${this.#pkg}::collect::reward`,
+          typeArguments: [tokenXType, tokenYType, rewardType],
+          arguments: [tx.object(poolId), tx.object(positionId), tx.object(this.#clk), tx.object(this.#ver)],
+        });
+        tx.transferObjects([rewardCoin], tx.pure.address(sender));
+      }
+
+      return tx;
+    },
+
+    /**
+     * Build a flash_loan transaction. Borrows tokens from a pool, executes
+     * arbitrary logic (provided via callback), then repays with fees.
+     * Returns the Transaction — caller must add their arbitrage logic between borrow and repay.
+     */
+    flashLoan: (params: {
+      poolId: string;
+      tokenXType: string;
+      tokenYType: string;
+      amountX: bigint;
+      amountY: bigint;
+      sender: string;
+    }): { tx: Transaction; balanceX: any; balanceY: any; receipt: any } => {
+      const { poolId, tokenXType, tokenYType, amountX, amountY, sender } = params;
+      const tx = this.#newTx(sender);
+
+      const [balanceX, balanceY, receipt] = tx.moveCall({
+        target: `${this.#pkg}::trade::flash_loan`,
+        typeArguments: [tokenXType, tokenYType],
+        arguments: [
+          tx.object(poolId),
+          tx.pure.u64(amountX),
+          tx.pure.u64(amountY),
+          tx.object(this.#ver),
+        ],
+      });
+
+      return { tx, balanceX, balanceY, receipt };
+    },
+
+    /**
+     * Repay a flash loan. Call this after your arbitrage logic to close the loan.
+     * Pass the receipt and balances returned from flashLoan().
+     */
+    repayFlashLoan: (params: {
+      tx: Transaction;
+      poolId: string;
+      tokenXType: string;
+      tokenYType: string;
+      receipt: any;
+      balanceX: any;
+      balanceY: any;
+    }): void => {
+      const { tx, poolId, tokenXType, tokenYType, receipt, balanceX, balanceY } = params;
+      tx.moveCall({
+        target: `${this.#pkg}::trade::repay_flash_loan`,
+        typeArguments: [tokenXType, tokenYType],
+        arguments: [tx.object(poolId), receipt, balanceX, balanceY, tx.object(this.#ver)],
+      });
+    },
+
+    /**
+     * Single-sided add liquidity (zap). Uses on-chain get_optimal_swap_amount_for_single_sided_liquidity
+     * to determine the optimal split, swaps one portion, then adds both tokens as liquidity.
+     * Requires an existing position (to determine tick range).
+     */
+    addLiquiditySingleSided: (params: {
+      poolId: string;
+      tokenXType: string;
+      tokenYType: string;
+      positionId: string;
+      amountIn: bigint;
+      isTokenX: boolean;
+      sender: string;
+      slippageBps?: bigint;
+    }): Transaction => {
+      const { poolId, tokenXType, tokenYType, positionId, amountIn, isTokenX, sender, slippageBps = 100n } = params;
+      const tx = this.#newTx(sender);
+      const inputType = isTokenX ? tokenXType : tokenYType;
+      const sqrtLimit = isTokenX ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n;
+
+      // Prepare input coin
+      const isSui = inputType.endsWith('::sui::SUI');
+      const inputCoin = isSui
+        ? tx.splitCoins(tx.gas, [tx.pure.u64(amountIn)])
+        : coinWithBalance({ type: inputType, balance: amountIn });
+
+      // Get deposit amount (coin value)
+      const depositAmount = tx.moveCall({
+        target: '0x2::coin::value',
+        typeArguments: [inputType],
+        arguments: [inputCoin],
+      });
+
+      // Get optimal swap amount from on-chain binary search
+      const [swapAmount] = tx.moveCall({
+        target: `${this.#pkg}::trade::get_optimal_swap_amount_for_single_sided_liquidity`,
+        typeArguments: [tokenXType, tokenYType],
+        arguments: [
+          tx.object(poolId),
+          depositAmount,
+          tx.object(positionId),
+          tx.pure.u128(sqrtLimit),
+          tx.pure.bool(isTokenX),
+          tx.pure.u64(20), // max_iterations
+        ],
+      });
+
+      // Split the swap portion from input
+      const [swapCoin] = tx.splitCoins(inputCoin, [swapAmount]);
+
+      // Convert swap coin to balance for flash_swap
+      const swapBal = tx.moveCall({
+        target: '0x2::coin::into_balance',
+        typeArguments: [inputType],
+        arguments: [swapCoin],
+      });
+
+      // Flash swap the portion
+      const [balX, balY, receipt] = tx.moveCall({
+        target: `${this.#pkg}::trade::flash_swap`,
+        typeArguments: [tokenXType, tokenYType],
+        arguments: [
+          tx.object(poolId),
+          tx.pure.bool(isTokenX),
+          tx.pure.bool(true),
+          swapAmount,
+          tx.pure.u128(sqrtLimit),
+          tx.object(this.#clk),
+          tx.object(this.#ver),
+        ],
+      });
+
+      // Repay flash swap
+      if (isTokenX) {
+        const zeroBal = tx.moveCall({ target: '0x2::balance::zero', typeArguments: [tokenYType] });
+        tx.moveCall({
+          target: `${this.#pkg}::trade::repay_flash_swap`,
+          typeArguments: [tokenXType, tokenYType],
+          arguments: [tx.object(poolId), receipt!, swapBal!, zeroBal!, tx.object(this.#ver)],
+        });
+        tx.moveCall({ target: '0x2::balance::destroy_zero', typeArguments: [tokenXType], arguments: [balX!] });
+        // Convert output balance to coin
+        const outputCoin = tx.moveCall({ target: '0x2::coin::from_balance', typeArguments: [tokenYType], arguments: [balY!] });
+        // Add liquidity with remaining input + swap output
+        const [refundX, refundY] = tx.moveCall({
+          target: `${this.#pkg}::liquidity::add_liquidity`,
+          typeArguments: [tokenXType, tokenYType],
+          arguments: [
+            tx.object(poolId), tx.object(positionId),
+            inputCoin, outputCoin,
+            tx.pure.u64(0), tx.pure.u64(0),
+            tx.object(this.#clk), tx.object(this.#ver),
+          ],
+        });
+        tx.transferObjects([refundX], tx.pure.address(sender));
+        tx.transferObjects([refundY], tx.pure.address(sender));
+      } else {
+        const zeroBal = tx.moveCall({ target: '0x2::balance::zero', typeArguments: [tokenXType] });
+        tx.moveCall({
+          target: `${this.#pkg}::trade::repay_flash_swap`,
+          typeArguments: [tokenXType, tokenYType],
+          arguments: [tx.object(poolId), receipt!, zeroBal!, swapBal!, tx.object(this.#ver)],
+        });
+        tx.moveCall({ target: '0x2::balance::destroy_zero', typeArguments: [tokenYType], arguments: [balY!] });
+        const outputCoin = tx.moveCall({ target: '0x2::coin::from_balance', typeArguments: [tokenXType], arguments: [balX!] });
+        const [refundX, refundY] = tx.moveCall({
+          target: `${this.#pkg}::liquidity::add_liquidity`,
+          typeArguments: [tokenXType, tokenYType],
+          arguments: [
+            tx.object(poolId), tx.object(positionId),
+            outputCoin, inputCoin,
+            tx.pure.u64(0), tx.pure.u64(0),
+            tx.object(this.#clk), tx.object(this.#ver),
+          ],
+        });
+        tx.transferObjects([refundX], tx.pure.address(sender));
+        tx.transferObjects([refundY], tx.pure.address(sender));
+      }
 
       return tx;
     },

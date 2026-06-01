@@ -106,6 +106,30 @@ export interface CollectRewardParams {
   sender: string;
 }
 
+export interface FlashLoanParams {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  amountX: bigint;
+  amountY: bigint;
+  sender: string;
+}
+
+export interface AddLiquiditySingleSidedParams {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  /** Existing position ID (determines tick range for optimal split) */
+  positionId: string;
+  /** Total amount of the single input token */
+  amountIn: bigint;
+  /** True if input token is tokenX, false if tokenY */
+  isTokenX: boolean;
+  sender: string;
+  /** Slippage tolerance in basis points. Defaults to 100 (1%). */
+  slippageBps?: bigint;
+}
+
 export interface SuiDexSDKOptions<Name = 'suidex'> {
   name?: Name;
   /** Override package IDs (for testnet or custom deployments) */
