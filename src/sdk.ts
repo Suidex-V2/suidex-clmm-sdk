@@ -673,9 +673,8 @@ export class SuiDexCLMMClient {
       amountIn: bigint;
       isTokenX: boolean;
       sender: string;
-      slippageBps?: bigint;
     }): Transaction => {
-      const { poolId, tokenXType, tokenYType, positionId, amountIn, isTokenX, sender, slippageBps = 100n } = params;
+      const { poolId, tokenXType, tokenYType, positionId, amountIn, isTokenX, sender } = params;
       const tx = this.#newTx(sender);
       const inputType = isTokenX ? tokenXType : tokenYType;
       const sqrtLimit = isTokenX ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n;

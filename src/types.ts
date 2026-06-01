@@ -126,8 +126,6 @@ export interface AddLiquiditySingleSidedParams {
   /** True if input token is tokenX, false if tokenY */
   isTokenX: boolean;
   sender: string;
-  /** Slippage tolerance in basis points. Defaults to 100 (1%). */
-  slippageBps?: bigint;
 }
 
 export interface IndexerPool {

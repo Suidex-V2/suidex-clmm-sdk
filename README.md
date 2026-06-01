@@ -12,18 +12,25 @@
 
 ## Overview
 
-The SuiDex CLMM SDK provides everything needed to interact with SuiDex V3 concentrated liquidity pools on Sui. Get quotes, build swap transactions, manage liquidity positions, and perform CLMM math calculations.
+The SuiDex CLMM SDK provides everything needed to interact with SuiDex V3 concentrated liquidity pools on Sui — swap, provide liquidity, flash loans, multi-pool routing, position management, and CLMM math.
 
 Built on the [Sui TypeScript SDK](https://sdk.mystenlabs.com/sui) using the official [client extension pattern](https://sdk.mystenlabs.com/sui/sdk-building), so it works with any Sui client (`SuiGrpcClient`, `SuiGraphQLClient`, or any `ClientWithCoreApi`).
 
 ### Features
 
-- **On-chain quotes** — Exact swap output via `compute_swap_result` simulation (multi-tick accurate, not an approximation)
-- **Transaction builders** — Swap, add/remove liquidity, collect fees — all return a `Transaction` ready for wallet signing
-- **CLMM math** — Tick/price conversions, position amount calculations, liquidity math (Q64 fixed-point)
-- **SIP-58 compatible** — Uses `coinWithBalance` for automatic coin object + address balance resolution
+- **On-chain quotes** — Exact swap output via `compute_swap_result` simulation (multi-tick accurate)
+- **Multi-pool routing** — Chain quotes across multiple pools via `preSwap`
+- **Transaction builders** — Swap, add/remove liquidity, collect fees/rewards, flash loans
+- **Position management** — Query positions by wallet, fetch position state
+- **Pool discovery** — List all pools with TVL, volume, and tick liquidity via indexer API
+- **Flash loans** — Borrow pool reserves for arbitrage with atomic repayment
+- **Single-sided LP** — Zap with on-chain optimal split calculation
+- **APR estimation** — Fee APR and reward APR helpers
+- **CLMM math** — Tick/price conversions, liquidity calculations (Q64 fixed-point)
+- **Event types** — Typed interfaces for all contract events (for indexers)
+- **SIP-58 compatible** — Uses `coinWithBalance` for automatic coin resolution
 - **Transport agnostic** — Works with gRPC, GraphQL, or any Sui client
-- **Minimal dependencies** — Only `@mysten/sui` as a peer dependency, zero additional runtime deps
+- **Minimal dependencies** — Only `@mysten/sui` as a peer dependency
 
 ## Installation
 
@@ -43,91 +50,84 @@ const client = new SuiGrpcClient({
 }).$extend(suidexCLMM());
 ```
 
-### Get a Quote
+## API Reference
+
+### Pool & Position Queries
 
 ```typescript
-const quote = await client.suidex.view.getQuote({
-  poolId: '0x02c8...0629',
-  tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
-  isXtoY: true,
-  amountIn: 1_000_000_000n, // 1 SUI (9 decimals)
-});
+// Fetch pool state
+const pool = await client.suidex.getPool('0xPoolId');
 
-console.log('Output:', quote.amountOut);       // Raw base units
-console.log('Impact:', quote.priceImpact, '%'); // e.g. 0.46
-console.log('Fee rate:', quote.feeRate);        // e.g. 3000 (= 0.30%)
+// Fetch position state
+const position = await client.suidex.getPosition('0xPositionId');
+
+// List all positions owned by a wallet
+const positions = await client.suidex.listPositions('0xWalletAddress');
 ```
 
-### Build a Swap Transaction
+### Quoting
 
 ```typescript
-// Get a quote first, then apply slippage tolerance
+// Single-pool quote
 const quote = await client.suidex.view.getQuote({
-  poolId: '0x02c8...0629',
+  poolId: '0xPoolId',
   tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
+  tokenYType: '0x...::token::TOKEN',
   isXtoY: true,
   amountIn: 1_000_000_000n,
 });
+// Returns: { amountOut, feeAmount, priceImpact, sqrtPriceAfter, feeRate }
 
-// 1% slippage tolerance
-const slippageBps = 100n;
-const minAmountOut = quote.amountOut - (quote.amountOut * slippageBps) / 10000n;
+// Multi-pool route quote (A → B → C)
+const output = await client.suidex.view.preSwap({
+  route: [
+    { poolId: '0xPool1', tokenXType: 'A', tokenYType: 'B', isXtoY: true },
+    { poolId: '0xPool2', tokenXType: 'B', tokenYType: 'C', isXtoY: true },
+  ],
+  amountIn: 1_000_000_000n,
+});
+```
+
+### Swap
+
+```typescript
+const quote = await client.suidex.view.getQuote({ ... });
+const minAmountOut = quote.amountOut - (quote.amountOut * 100n) / 10000n; // 1% slippage
 
 const tx = client.suidex.tx.swap({
-  poolId: '0x02c8...0629',
+  poolId: '0xPoolId',
   tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
+  tokenYType: '0x...::token::TOKEN',
   isXtoY: true,
   amountIn: 1_000_000_000n,
-  minAmountOut, // TX aborts if output is less than this
+  minAmountOut,
   sender: '0xYourAddress',
 });
 
-// Sign with any Sui wallet
 const result = await wallet.signAndExecuteTransaction({ transaction: tx });
-```
-
-### Read Pool State
-
-```typescript
-const pool = await client.suidex.getPool('0x02c8...0629');
-
-console.log('Token X:', pool.tokenXType);
-console.log('Token Y:', pool.tokenYType);
-console.log('Sqrt Price:', pool.sqrtPrice);
-console.log('Liquidity:', pool.liquidity);
-console.log('Fee Rate:', pool.feeRate);       // 3000 = 0.30%
-console.log('Tick Spacing:', pool.tickSpacing);
-console.log('Current Tick:', pool.tickIndex);
 ```
 
 ### Add Liquidity
 
 ```typescript
-// Open a new position and add liquidity
-const amountX = 1_000_000_000n; // 1 SUI
-const amountY = 500_000_000n;   // 500 VICTORY
-
-// 1% slippage tolerance on deposited amounts
-const slippageBps = 100n;
+// New position
 const tx = client.suidex.tx.addLiquidity({
-  poolId: '0x02c8...0629',
+  poolId: '0xPoolId',
   tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
+  tokenYType: '0x...::token::TOKEN',
   tickLower: 4200,
   tickUpper: 5400,
-  amountX,
-  amountY,
-  minAmountX: amountX - (amountX * slippageBps) / 10000n,
-  minAmountY: amountY - (amountY * slippageBps) / 10000n,
+  amountX: 1_000_000_000n,
+  amountY: 500_000_000n,
+  minAmountX: 990_000_000n,
+  minAmountY: 495_000_000n,
   sender: '0xYourAddress',
+  tickSpacing: 60, // validates tick alignment before building TX
 });
 
-// Add to an existing position
+// Add to existing position
 const tx2 = client.suidex.tx.addLiquidity({
-  // ...same params...
+  ...params,
   existingPositionId: '0xPositionId',
 });
 ```
@@ -135,163 +135,237 @@ const tx2 = client.suidex.tx.addLiquidity({
 ### Remove Liquidity
 
 ```typescript
+// Partial remove (keep position open)
 const tx = client.suidex.tx.removeLiquidity({
-  poolId: '0x02c8...0629',
-  positionId: '0xPositionId',
-  tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
-  liquidityAmount: 1_000_000n,
-  minAmountX: 900_000_000n, // Minimum token X to receive
-  minAmountY: 450_000_000n, // Minimum token Y to receive
+  poolId, positionId, tokenXType, tokenYType,
+  liquidityAmount: position.liquidity / 2n,
+  minAmountX: 0n, minAmountY: 0n,
   sender: '0xYourAddress',
-  closePosition: false, // Set true to close the position entirely
+  closePosition: false,
+});
+
+// Full remove + close (auto-collects fees and rewards)
+const tx2 = client.suidex.tx.removeLiquidity({
+  poolId, positionId, tokenXType, tokenYType,
+  liquidityAmount: position.liquidity,
+  minAmountX: 0n, minAmountY: 0n,
+  sender: '0xYourAddress',
+  closePosition: true,
+  rewardCoinTypes: ['0x...::victory_token::VICTORY_TOKEN'],
 });
 ```
 
-### Collect Fees
+### Collect Fees & Rewards
 
 ```typescript
+// Collect trading fees
 const tx = client.suidex.tx.collectFees({
-  poolId: '0x02c8...0629',
-  positionId: '0xPositionId',
-  tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
-  sender: '0xYourAddress',
+  poolId, positionId, tokenXType, tokenYType, sender,
+});
+
+// Collect single reward type
+const tx2 = client.suidex.tx.collectReward({
+  poolId, positionId, tokenXType, tokenYType,
+  rewardCoinType: '0x...::victory_token::VICTORY_TOKEN',
+  sender,
+});
+
+// Collect ALL reward types in one TX
+const tx3 = client.suidex.tx.collectAllRewards({
+  poolId, positionId, tokenXType, tokenYType,
+  rewardCoinTypes: ['0x...::reward1::R1', '0x...::reward2::R2'],
+  sender,
 });
 ```
 
-### Collect Incentive Rewards
-
-For pools with VICTORY or other incentive rewards:
+### Flash Loans
 
 ```typescript
-const tx = client.suidex.tx.collectReward({
-  poolId: '0x02c8...0629',
-  positionId: '0xPositionId',
-  tokenXType: '0x2::sui::SUI',
-  tokenYType: '0x...::victory_token::VICTORY_TOKEN',
-  rewardCoinType: '0x...::victory_token::VICTORY_TOKEN', // The reward token type
-  sender: '0xYourAddress',
+// Borrow from pool, execute arb logic, repay with fees
+const { tx, balanceX, balanceY, receipt } = client.suidex.tx.flashLoan({
+  poolId, tokenXType, tokenYType,
+  amountX: 1_000_000_000n,
+  amountY: 0n,
+  sender,
+});
+
+// ... add your arbitrage logic here (moveCall, etc.) ...
+
+// Repay (must return borrowed amount + fee)
+client.suidex.tx.repayFlashLoan({
+  tx, poolId, tokenXType, tokenYType,
+  receipt, balanceX, balanceY,
+});
+
+await wallet.signAndExecuteTransaction({ transaction: tx });
+```
+
+### Single-Sided Liquidity (Zap)
+
+```typescript
+// Add liquidity with only one token — SDK auto-calculates optimal split
+const tx = client.suidex.tx.addLiquiditySingleSided({
+  poolId, tokenXType, tokenYType,
+  positionId: '0xExistingPosition',
+  amountIn: 1_000_000_000n,
+  isTokenX: true, // depositing token X
+  sender,
 });
 ```
 
-> **Note:** Incentive rewards must be collected before a position can be closed. When using `removeLiquidity` with `closePosition: true`, pass `rewardCoinType` to auto-collect rewards before closing.
+### Indexer API (Pool Discovery)
 
-## Math Utilities
+```typescript
+// List all pools with TVL and volume
+const pools = await client.suidex.api.getAllPools();
+// Returns: [{ poolId, tokenXType, tokenYType, feeRate, tickSpacing, liquidity, tvlUsd, volume24hUsd, ... }]
 
-The SDK exports CLMM math functions for working with ticks, prices, and positions.
+// Get tick liquidity depth for a pool
+const ticks = await client.suidex.api.getPoolTicks('0xPoolId');
+// Returns: [{ tickLower, tickUpper, netLiquidity }]
+
+// Protocol stats
+const stats = await client.suidex.api.getStats();
+// Returns: { totalPools, totalTvlUsd, totalVolume24hUsd, totalSwaps24h, activePositions }
+```
+
+### APR Estimation
+
+```typescript
+import { SuiDexCLMMClient } from '@suidex/clmm-sdk';
+
+// Fee APR
+const feeAPR = SuiDexCLMMClient.estimateFeeAPR({
+  volume24hUsd: 50000,
+  feeRate: 3000, // 0.30%
+  positionLiquidity: position.liquidity,
+  poolLiquidity: pool.liquidity,
+  positionValueUsd: 1000,
+});
+
+// Reward APR
+const rewardAPR = SuiDexCLMMClient.estimateRewardAPR({
+  rewardPerSecond: 1_000_000_000n,
+  rewardDecimals: 9,
+  rewardPriceUsd: 0.50,
+  positionLiquidity: position.liquidity,
+  poolLiquidity: pool.liquidity,
+  positionValueUsd: 1000,
+});
+```
+
+### Math Utilities
 
 ```typescript
 import {
-  tickToSqrtPrice,
-  sqrtPriceToPrice,
-  priceToTick,
-  tickToPrice,
-  getAmountsForLiquidity,
-  getLiquidityForAmounts,
+  tickToSqrtPrice, sqrtPriceToTick, sqrtPriceToPrice,
+  priceToTick, tickToPrice,
+  getAmountsForLiquidity, getLiquidityForAmounts,
 } from '@suidex/clmm-sdk';
 
-// Convert between ticks and prices
+// Tick ↔ sqrt price (exact, integer)
 const sqrtPrice = tickToSqrtPrice(5000);
-const price = sqrtPriceToPrice(sqrtPrice, 9, 6); // decimalsX, decimalsY
-const tick = priceToTick(1800, 9, 6, 60);         // price, decimalsX, decimalsY, tickSpacing
+const tick = sqrtPriceToTick(pool.sqrtPrice);
 
-// Calculate position token amounts
+// Human-readable price
+const price = sqrtPriceToPrice(pool.sqrtPrice, 9, 6); // decimalsX, decimalsY
+const tick2 = priceToTick(1800, 9, 6, 60); // price, decimalsX, decimalsY, tickSpacing
+
+// Position token amounts
 const { amountX, amountY } = getAmountsForLiquidity(
-  pool.sqrtPrice,                // current pool sqrt price
-  tickToSqrtPrice(tickLower),    // lower bound
-  tickToSqrtPrice(tickUpper),    // upper bound
-  positionLiquidity,             // position liquidity value
+  pool.sqrtPrice, tickToSqrtPrice(tickLower), tickToSqrtPrice(tickUpper), liquidity,
 );
 
-// Calculate liquidity from token amounts
-const liquidity = getLiquidityForAmounts(
-  pool.sqrtPrice,
-  tickToSqrtPrice(tickLower),
-  tickToSqrtPrice(tickUpper),
-  amountX,
-  amountY,
+// Liquidity from token amounts
+const liq = getLiquidityForAmounts(
+  pool.sqrtPrice, tickToSqrtPrice(tickLower), tickToSqrtPrice(tickUpper), amountX, amountY,
 );
+```
+
+### Event Types (for Indexers)
+
+```typescript
+import { EVENT_TYPES } from '@suidex/clmm-sdk';
+import type { SwapEvent, AddLiquidityEvent } from '@suidex/clmm-sdk';
+
+// Filter events by type
+const swapEvents = txEvents.filter(e => e.type === EVENT_TYPES.Swap);
+const parsed = swapEvents[0].parsedJson as SwapEvent;
+console.log(parsed.amount_x, parsed.amount_y, parsed.fee_amount);
+
+// Available: EVENT_TYPES.Swap, .AddLiquidity, .RemoveLiquidity,
+//   .CollectFee, .CollectReward, .OpenPosition, .ClosePosition,
+//   .FlashLoan, .PoolCreated, .RepayFlashSwap, .RepayFlashLoan
 ```
 
 ## Important Notes
 
 ### Amounts are in raw base units
 
-All amounts in the SDK use raw on-chain base units (the smallest indivisible unit of each token). To convert to human-readable values, divide by `10^decimals`:
-
-| Token | Decimals | 1.0 tokens = raw |
-|-------|----------|-------------------|
-| SUI   | 9        | `1_000_000_000`   |
-
-Check each token's decimals via `suix_getCoinMetadata`. The SDK does not assume decimals for any token.
+All amounts use raw on-chain base units. Divide by `10^decimals` for human values. Check decimals via `suix_getCoinMetadata`.
 
 ### Slippage protection
 
-All transaction builders accept minimum output/amount parameters for slippage protection. **Always set these in production.** Passing `0n` disables slippage checks — the transaction will succeed regardless of price movement. This is only appropriate for testing or simulations.
-
-```typescript
-// PRODUCTION: derive min from quote
-const minOut = quote.amountOut - (quote.amountOut * 100n) / 10000n; // 1% slippage
-
-// TESTING ONLY: no slippage check
-const minOut = 0n;
-```
+All transaction builders accept `minAmountOut` / `minAmountX` / `minAmountY` for slippage. **Always set these in production.** Passing `0n` disables slippage checks.
 
 ### Fee rate encoding
 
-Fee rates are stored as integers where `1_000_000 = 100%`:
-
-| Fee rate value | Percentage |
-|----------------|------------|
-| 500            | 0.05%      |
-| 3000           | 0.30%      |
-| 10000          | 1.00%      |
+Fee rates are integers where `1_000_000 = 100%`: 500 = 0.05%, 3000 = 0.30%, 10000 = 1.00%.
 
 ### Price representation
 
-SuiDex V3 uses **Q64 fixed-point** sqrt prices (2^64 scale factor), different from Uniswap V3's Q96. The `sqrtPriceToPrice()` function handles the conversion to human-readable prices — pass the correct decimals for each token.
+SuiDex V3 uses **Q64 fixed-point** sqrt prices (2^64 scale factor), different from Uniswap V3's Q96.
 
-### Price impact
+### Tick spacing
 
-The `priceImpact` field returned by `getQuote()` is an **estimate** derived from comparing spot price output to actual simulated output. It is useful for UI display and route selection, but should not be treated as an exact value. It does not account for fee structure granularity or multi-tick crossing edge cases.
+Ticks must be aligned to the pool's `tickSpacing`. Pass `tickSpacing` to `addLiquidity` for client-side validation (avoids wasting gas on contract abort code 19).
 
-### Swap mechanism
+### Closing positions
 
-Swaps use the **flash_swap + repay_flash_swap** pattern (hot potato). The SDK builds the full PTB atomically — no partial execution is possible.
+Positions with unclaimed incentive rewards cannot be closed (contract abort code 30). Pass `rewardCoinTypes` when closing to auto-collect all rewards first.
 
 ## Constants
 
 ```typescript
-import { MAINNET, MIN_TICK, MAX_TICK, Q64 } from '@suidex/clmm-sdk';
+import { MAINNET, MIN_TICK, MAX_TICK, Q64, FEE_DENOMINATOR } from '@suidex/clmm-sdk';
 
-MAINNET.PACKAGE_ID   // V3 contract package
-MAINNET.VERSION_ID   // Version object
-MAINNET.CLOCK_ID     // Sui Clock (0x6)
+MAINNET.PACKAGE_ID          // V3 contract package
+MAINNET.ORIGINAL_PACKAGE_ID // Original package (for struct types)
+MAINNET.VERSION_ID          // Version object
+MAINNET.CLOCK_ID            // Sui Clock (0x6)
 
 MIN_TICK  // -443636
 MAX_TICK  //  443636
 Q64       // 2^64 (18446744073709551616n)
+FEE_DENOMINATOR // 1_000_000n
 ```
 
 ## Custom Deployments
-
-Override package IDs for testnet or custom deployments:
 
 ```typescript
 const client = new SuiGrpcClient({ ... }).$extend(
   suidexCLMM({
     packageId: '0xYourPackage',
     versionId: '0xYourVersion',
+    apiUrl: 'https://your-indexer.com',
   })
 );
 ```
+
+## Testing
+
+```bash
+SUI_PRIVATE_KEY=suiprivkey1... npx tsx --test test/sdk.test.ts
+```
+
+Tests execute real mainnet transactions (swap, LP, fees, rewards, flash loans). Requires a funded wallet with ~0.1 SUI.
 
 ## Contract
 
 SuiDex V3 CLMM is an audited, MIT-licensed concentrated liquidity protocol on Sui.
 
-- **Audit**: [SpyWolf Security Audit](https://github.com/AuditReports/Spywolf) — 0 critical, 0 high, 1 medium (JIT protection, resolved). Covers Move contracts at package `0xb5f529c1dcda6580a61bf7ee9fbd524b50be62f11044d137c8202c8cbace9e56`. The SDK itself wraps audited on-chain functions; the SDK TypeScript code was not in audit scope.
+- **Audit**: [SpyWolf Security Audit](https://github.com/AuditReports/Spywolf) — 0 critical, 0 high, 1 medium (JIT protection, resolved)
+- **Package**: `0xb5f529c1dcda6580a61bf7ee9fbd524b50be62f11044d137c8202c8cbace9e56`
 - **Contract source**: [suidex-v3-clmm](https://github.com/Suidex-V2/suidex-v3-clmm)
 
 ## License
