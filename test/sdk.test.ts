@@ -37,7 +37,8 @@ import type { Pool, Position } from '../src/types.js';
 
 // ─── Test Wallet & Pool ──────────────────────────────────────────
 
-const KEEPER_KEY = '***REMOVED***';
+const KEEPER_KEY = process.env.SUI_PRIVATE_KEY;
+if (!KEEPER_KEY) throw new Error('Set SUI_PRIVATE_KEY env var to run tests (e.g. SUI_PRIVATE_KEY=suiprivkey1... npx tsx --test test/sdk.test.ts)');
 const keypair = Ed25519Keypair.fromSecretKey(KEEPER_KEY);
 const WALLET = keypair.toSuiAddress();
 
