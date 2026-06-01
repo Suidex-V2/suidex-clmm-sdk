@@ -36,6 +36,7 @@ export type {
 // Math utilities
 export {
   tickToSqrtPrice,
+  sqrtPriceToTick,
   sqrtPriceToPrice,
   priceToTick,
   tickToPrice,

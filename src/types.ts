@@ -36,6 +36,8 @@ export interface QuoteResult {
   /** Estimated price impact (%). Derived from spot vs actual output — treat as directional, not exact. */
   priceImpact: number;
   sqrtPriceAfter: bigint;
+  /** Exact fee amount charged by the pool (from on-chain simulation). */
+  feeAmount: bigint;
 }
 
 export interface SwapParams {
@@ -63,6 +65,8 @@ export interface AddLiquidityParams {
   minAmountX?: bigint;
   /** Minimum token Y actually deposited — aborts TX if slippage exceeds tolerance. Defaults to 0. */
   minAmountY?: bigint;
+  /** Pool tick spacing — if provided, validates tick alignment before building TX (avoids gas waste on abort code 19). */
+  tickSpacing?: number;
 }
 
 export interface RemoveLiquidityParams {
@@ -72,9 +76,11 @@ export interface RemoveLiquidityParams {
   tokenYType: string;
   liquidityAmount: bigint;
   sender: string;
-  /** Close the position after removing all liquidity. Rewards must be collected first — pass rewardCoinType if the pool has incentives. */
+  /** Close the position after removing all liquidity. Rewards must be collected first — pass rewardCoinTypes if the pool has incentives. */
   closePosition?: boolean;
-  /** If closing a position on an incentivized pool, provide the reward coin type to auto-collect before close. */
+  /** All reward coin types to auto-collect before close. Supports multiple reward tokens. */
+  rewardCoinTypes?: string | string[];
+  /** @deprecated Use rewardCoinTypes instead. Single reward type — still works for backwards compat. */
   rewardCoinType?: string;
   /** Minimum token X received — aborts TX if slippage exceeds tolerance. Defaults to 0. */
   minAmountX?: bigint;

@@ -12,10 +12,11 @@
 
 import type { ClientWithCoreApi } from '@mysten/sui/client';
 import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
-import { MAINNET, MIN_SQRT_PRICE, MAX_SQRT_PRICE, Q64 } from './constants.js';
+import { bcs } from '@mysten/sui/bcs';
+import { MAINNET, MIN_SQRT_PRICE, MAX_SQRT_PRICE, MIN_TICK, MAX_TICK, Q64 } from './constants.js';
 import { tickToSqrtPrice } from './math.js';
 import type {
-  Pool, QuoteResult, SwapParams,
+  Pool, Position, QuoteResult, SwapParams,
   AddLiquidityParams, RemoveLiquidityParams, CollectFeesParams,
   CollectRewardParams, SuiDexSDKOptions,
 } from './types.js';
@@ -81,6 +82,27 @@ export class SuiDexCLMMClient {
     };
   }
 
+  /** Fetch a position's on-chain state. */
+  async getPosition(positionId: string): Promise<Position> {
+    const { object } = await this.#client.core.getObject({
+      objectId: positionId,
+      include: { json: true },
+    });
+    const json = (object as any)?.json;
+    if (!json) throw new Error(`Position ${positionId} not found`);
+    return {
+      positionId,
+      poolId: json.pool_id ?? '',
+      tickLower: this.#parseI32(json.tick_lower_index),
+      tickUpper: this.#parseI32(json.tick_upper_index),
+      liquidity: BigInt(json.liquidity ?? '0'),
+      feeGrowthInsideXLast: BigInt(json.fee_growth_inside_x_last ?? '0'),
+      feeGrowthInsideYLast: BigInt(json.fee_growth_inside_y_last ?? '0'),
+      tokensOwedX: BigInt(json.tokens_owed_x ?? json.owed_coin_x ?? '0'),
+      tokensOwedY: BigInt(json.tokens_owed_y ?? json.owed_coin_y ?? '0'),
+    };
+  }
+
   // ─── View Methods (on-chain simulation) ──────────────────────
 
   view = {
@@ -97,6 +119,9 @@ export class SuiDexCLMMClient {
     }): Promise<QuoteResult> => {
       const { poolId, tokenXType, tokenYType, isXtoY, amountIn } = params;
       const sqrtLimit = isXtoY ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n;
+
+      // Fetch pool state BEFORE simulation to avoid TOCTOU race on price impact calc
+      const pool = await this.getPool(poolId);
 
       const tx = new Transaction();
       tx.setSender('0x0000000000000000000000000000000000000000000000000000000000000000');
@@ -120,13 +145,11 @@ export class SuiDexCLMMClient {
 
       const rv = (result as any)?.commandResults?.[0]?.returnValues?.[0];
       if (!rv) throw new Error('Quote simulation returned no results');
-      const { amountOut, sqrtPriceAfter } = SuiDexCLMMClient.#parseSwapResult(rv.bcs ?? []);
+      const { amountOut, sqrtPriceAfter, feeAmount } = SuiDexCLMMClient.#parseSwapResult(rv.bcs ?? []);
 
       // Estimated price impact: compares spot price output vs actual output.
-      // This is an approximation — it does not account for fee structure or
-      // multi-tick crossing granularity. Treat as directional, not exact.
+      // Uses pool state fetched before simulation to avoid TOCTOU.
       let priceImpact = 0;
-      const pool = await this.getPool(poolId);
       const sqrtPrice = pool.sqrtPrice;
       if (sqrtPrice > 0n && amountIn > 0n && amountOut > 0n) {
         const sqrtPriceSq = sqrtPrice * sqrtPrice;
@@ -148,6 +171,7 @@ export class SuiDexCLMMClient {
         feeRate: pool.feeRate,
         priceImpact,
         sqrtPriceAfter,
+        feeAmount,
       };
     },
   };
@@ -233,6 +257,23 @@ export class SuiDexCLMMClient {
     /** Build an add_liquidity transaction. Opens a new position if no existingPositionId. */
     addLiquidity: (params: AddLiquidityParams): Transaction => {
       const { poolId, tokenXType, tokenYType, tickLower, tickUpper, amountX, amountY, sender, existingPositionId, minAmountX = 0n, minAmountY = 0n } = params;
+
+      // Validate ticks before building TX (avoids wasting gas on contract aborts)
+      if (tickLower >= tickUpper) {
+        throw new Error(`Invalid tick range: tickLower (${tickLower}) must be less than tickUpper (${tickUpper})`);
+      }
+      if (tickLower < MIN_TICK || tickUpper > MAX_TICK) {
+        throw new Error(`Tick out of bounds: [${MIN_TICK}, ${MAX_TICK}]. Got tickLower=${tickLower}, tickUpper=${tickUpper}`);
+      }
+      if (params.tickSpacing) {
+        if (tickLower % params.tickSpacing !== 0) {
+          throw new Error(`tickLower (${tickLower}) not aligned to tickSpacing (${params.tickSpacing}). Use ${Math.round(tickLower / params.tickSpacing) * params.tickSpacing}`);
+        }
+        if (tickUpper % params.tickSpacing !== 0) {
+          throw new Error(`tickUpper (${tickUpper}) not aligned to tickSpacing (${params.tickSpacing}). Use ${Math.round(tickUpper / params.tickSpacing) * params.tickSpacing}`);
+        }
+      }
+
       const tx = this.#newTx(sender);
 
       // Open position or use existing
@@ -278,9 +319,14 @@ export class SuiDexCLMMClient {
       return tx;
     },
 
-    /** Build a remove_liquidity transaction. When closing a position on an incentivized pool, pass rewardCoinType to auto-collect rewards first. */
+    /** Build a remove_liquidity transaction. When closing a position on an incentivized pool, pass rewardCoinTypes to auto-collect rewards first. */
     removeLiquidity: (params: RemoveLiquidityParams): Transaction => {
-      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition, rewardCoinType, minAmountX = 0n, minAmountY = 0n } = params;
+      const { poolId, positionId, tokenXType, tokenYType, liquidityAmount, sender, closePosition, minAmountX = 0n, minAmountY = 0n } = params;
+      // Normalize rewardCoinTypes: support both single string (legacy) and array
+      const rewardCoinTypes: string[] = params.rewardCoinTypes
+        ? (Array.isArray(params.rewardCoinTypes) ? params.rewardCoinTypes : [params.rewardCoinTypes])
+        : params.rewardCoinType ? [params.rewardCoinType] : [];
+
       const tx = this.#newTx(sender);
 
       const [coinX, coinY] = tx.moveCall({
@@ -307,11 +353,11 @@ export class SuiDexCLMMClient {
         tx.transferObjects([feeX], tx.pure.address(sender));
         tx.transferObjects([feeY], tx.pure.address(sender));
 
-        // Collect incentive rewards before close (required — position cannot close with unclaimed rewards)
-        if (rewardCoinType) {
+        // Collect ALL incentive rewards before close (required — position cannot close with unclaimed rewards)
+        for (const rewardType of rewardCoinTypes) {
           const rewardCoin = tx.moveCall({
             target: `${this.#pkg}::collect::reward`,
-            typeArguments: [tokenXType, tokenYType, rewardCoinType],
+            typeArguments: [tokenXType, tokenYType, rewardType],
             arguments: [tx.object(poolId), tx.object(positionId), tx.object(this.#clk), tx.object(this.#ver)],
           });
           tx.transferObjects([rewardCoin], tx.pure.address(sender));
@@ -363,21 +409,30 @@ export class SuiDexCLMMClient {
   // ─── Internal Helpers ────────────────────────────────────────
 
   /**
-   * Parse compute_swap_result BCS return value.
-   * Layout: [amount_specified_remaining(u64), amount_calculated(u64), sqrt_price(u128)]
+   * Parse compute_swap_result BCS return value using @mysten/sui/bcs typed schema.
+   * On-chain SwapState struct layout:
+   *   amount_specified_remaining: u64, amount_calculated: u64, sqrt_price: u128,
+   *   tick_index: I32, fee_growth_global: u128, protocol_fee: u64, liquidity: u128, fee_amount: u64
    */
-  static #parseSwapResult(bcsBytes: Uint8Array | number[]): { amountOut: bigint; sqrtPriceAfter: bigint } {
-    let amountOut = 0n;
-    for (let i = 0; i < 8; i++) {
-      const b = bcsBytes[i + 8];
-      if (b !== undefined) amountOut += BigInt(b) << BigInt(i * 8);
-    }
-    let sqrtPriceAfter = 0n;
-    for (let i = 0; i < 16; i++) {
-      const b = bcsBytes[i + 16];
-      if (b !== undefined) sqrtPriceAfter += BigInt(b) << BigInt(i * 8);
-    }
-    return { amountOut, sqrtPriceAfter };
+  static readonly #swapStateSchema = bcs.struct('SwapState', {
+    amount_specified_remaining: bcs.u64(),
+    amount_calculated: bcs.u64(),
+    sqrt_price: bcs.u128(),
+    tick_index: bcs.u32(),
+    fee_growth_global: bcs.u128(),
+    protocol_fee: bcs.u64(),
+    liquidity: bcs.u128(),
+    fee_amount: bcs.u64(),
+  });
+
+  static #parseSwapResult(bcsBytes: Uint8Array | number[]): { amountOut: bigint; sqrtPriceAfter: bigint; feeAmount: bigint } {
+    const bytes = bcsBytes instanceof Uint8Array ? bcsBytes : new Uint8Array(bcsBytes);
+    const parsed = SuiDexCLMMClient.#swapStateSchema.parse(bytes);
+    return {
+      amountOut: BigInt(parsed.amount_calculated),
+      sqrtPriceAfter: BigInt(parsed.sqrt_price),
+      feeAmount: BigInt(parsed.fee_amount),
+    };
   }
 
   #newTx(sender: string): Transaction {

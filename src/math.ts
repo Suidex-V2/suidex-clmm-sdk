@@ -94,6 +94,24 @@ export function tickToSqrtPrice(tick: number): bigint {
   return getSqrtPriceAtPositiveTick(tick);
 }
 
+/** Convert a Q64 sqrt price to the corresponding tick index (integer binary search, exact). */
+export function sqrtPriceToTick(sqrtPrice: bigint): number {
+  if (sqrtPrice <= 0n) throw new Error('sqrtPrice must be positive');
+  // Binary search: find tick where tickToSqrtPrice(tick) <= sqrtPrice < tickToSqrtPrice(tick+1)
+  let low = MIN_TICK;
+  let high = MAX_TICK;
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    const midSqrt = tickToSqrtPrice(mid);
+    if (midSqrt <= sqrtPrice) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low;
+}
+
 /** Convert a Q64 sqrt price to a human-readable price. */
 export function sqrtPriceToPrice(sqrtPrice: bigint, decimalsX: number, decimalsY: number): number {
   const sqrtPriceNum = Number(sqrtPrice) / Number(Q64);

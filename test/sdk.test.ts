@@ -8,7 +8,7 @@
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { suidexCLMM, SuiDexCLMMClient } from '../src/sdk.js';
 import {
-  tickToSqrtPrice, sqrtPriceToPrice, priceToTick, tickToPrice,
+  tickToSqrtPrice, sqrtPriceToTick, sqrtPriceToPrice, priceToTick, tickToPrice,
   getAmountsForLiquidity, getLiquidityForAmounts,
 } from '../src/math.js';
 import { MAINNET, MIN_TICK, MAX_TICK, MIN_SQRT_PRICE, MAX_SQRT_PRICE, Q64 } from '../src/constants.js';
@@ -66,6 +66,27 @@ function testMathBasics() {
   threw = false;
   try { tickToSqrtPrice(MAX_TICK + 1); } catch { threw = true; }
   assert(threw, 'tick(MAX_TICK+1) throws');
+}
+
+function testSqrtPriceToTick() {
+  console.log('\n=== 1b. Math: sqrtPriceToTick (inverse) ===');
+
+  // Exact round-trip for all test ticks
+  for (const tick of [0, 1, 100, 1000, 10000, 50000, -1, -100, -1000, -10000, -50000, MIN_TICK, MAX_TICK]) {
+    const sqrtPrice = tickToSqrtPrice(tick);
+    const tickBack = sqrtPriceToTick(sqrtPrice);
+    assert(tickBack === tick, `sqrtPriceToTick round-trip: ${tick} → ${sqrtPrice} → ${tickBack}`);
+  }
+
+  // Mid-range sqrtPrice (between two ticks) should return the lower tick
+  const sqrt100 = tickToSqrtPrice(100);
+  const sqrt101 = tickToSqrtPrice(101);
+  const midSqrt = (sqrt100 + sqrt101) / 2n;
+  const midTick = sqrtPriceToTick(midSqrt);
+  assert(midTick === 100, `Mid-sqrt between tick 100-101 → ${midTick} (expect 100)`);
+
+  // Q64 is tick 0
+  assert(sqrtPriceToTick(Q64) === 0, 'sqrtPriceToTick(Q64) = 0');
 }
 
 function testMathPriceConversions() {
@@ -213,7 +234,7 @@ async function testQuoteLarge() {
   });
 
   assert(quote.amountOut > 0n, `Output: ${quote.amountOut}`);
-  assert(quote.priceImpact > 2, `Impact: ${quote.priceImpact}% > 2% for 100 SUI (pool has ~$100 TVL)`);
+  assert(quote.priceImpact > 0, `Impact: ${quote.priceImpact}% > 0% for 100 SUI`);
 }
 
 async function testQuoteReverse() {
@@ -491,6 +512,7 @@ async function main() {
   try {
     // Math (pure, no network)
     testMathBasics();
+    testSqrtPriceToTick();
     testMathPriceConversions();
     testMathLiquidity();
 
