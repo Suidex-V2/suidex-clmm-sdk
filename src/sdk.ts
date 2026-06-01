@@ -18,7 +18,7 @@ import { tickToSqrtPrice } from './math.js';
 import type {
   Pool, Position, QuoteResult, SwapParams,
   AddLiquidityParams, RemoveLiquidityParams, CollectFeesParams,
-  CollectRewardParams, SuiDexSDKOptions,
+  CollectRewardParams, IndexerPool, TickData, SuiDexSDKOptions,
 } from './types.js';
 
 // ─── Client Extension Factory ────────────────────────────────────
@@ -27,6 +27,7 @@ export function suidexCLMM<const Name = 'suidex'>({
   name = 'suidex' as Name,
   packageId,
   versionId,
+  apiUrl,
 }: SuiDexSDKOptions<Name> = {}) {
   return {
     name,
@@ -35,6 +36,7 @@ export function suidexCLMM<const Name = 'suidex'>({
         client,
         packageId: packageId ?? MAINNET.PACKAGE_ID,
         versionId: versionId ?? MAINNET.VERSION_ID,
+        apiUrl: apiUrl ?? 'https://dex.suidex.org',
       });
     },
   };
@@ -47,15 +49,18 @@ export class SuiDexCLMMClient {
   #pkg: string;
   #ver: string;
   #clk = MAINNET.CLOCK_ID;
+  #apiUrl: string;
 
-  constructor({ client, packageId, versionId }: {
+  constructor({ client, packageId, versionId, apiUrl }: {
     client: ClientWithCoreApi;
     packageId: string;
     versionId: string;
+    apiUrl?: string;
   }) {
     this.#client = client;
     this.#pkg = packageId;
     this.#ver = versionId;
+    this.#apiUrl = apiUrl ?? 'https://dex.suidex.org';
   }
 
   // ─── Top-level Methods ───────────────────────────────────────
@@ -140,6 +145,90 @@ export class SuiDexCLMMClient {
     }
 
     return positions;
+  }
+
+  // ─── API Methods (indexer) ───────────────────────────────────
+
+  api = {
+    /** Fetch all pools from the SuiDex V3 indexer API. Includes TVL, volume, fee data. */
+    getAllPools: async (): Promise<IndexerPool[]> => {
+      const res = await fetch(`${this.#apiUrl}/api/v3/pools`);
+      if (!res.ok) throw new Error(`Failed to fetch pools: ${res.status}`);
+      const data = await res.json() as any[];
+      return data.map(p => ({
+        poolId: p.pool_id,
+        tokenXType: p.token_x_type,
+        tokenYType: p.token_y_type,
+        feeRate: Number(p.fee_rate),
+        tickSpacing: Number(p.tick_spacing),
+        sqrtPrice: BigInt(p.sqrt_price ?? '0'),
+        liquidity: BigInt(p.liquidity ?? '0'),
+        tickIndex: Number(p.tick_index ?? 0),
+        tvlUsd: Number(p.tvl_usd ?? 0),
+        volume24hUsd: Number(p.volume_24h_usd ?? 0),
+        approved: p.approved ?? false,
+      }));
+    },
+
+    /** Fetch tick liquidity data for a pool. Returns initialized tick ranges with net liquidity. */
+    getPoolTicks: async (poolId: string): Promise<TickData[]> => {
+      const res = await fetch(`${this.#apiUrl}/api/v3/pools/${poolId}/ticks`);
+      if (!res.ok) throw new Error(`Failed to fetch ticks: ${res.status}`);
+      const data = await res.json() as any[];
+      return data.map(t => ({
+        tickLower: Number(t.tick_lower),
+        tickUpper: Number(t.tick_upper),
+        netLiquidity: BigInt(t.net_liquidity ?? '0'),
+      }));
+    },
+
+    /** Fetch protocol-level stats (total TVL, volume, swaps, positions). */
+    getStats: async (): Promise<{ totalPools: number; totalTvlUsd: number; totalVolume24hUsd: number; totalSwaps24h: number; activePositions: number }> => {
+      const res = await fetch(`${this.#apiUrl}/api/v3/stats`);
+      if (!res.ok) throw new Error(`Failed to fetch stats: ${res.status}`);
+      return res.json() as any;
+    },
+  };
+
+  // ─── APR Estimation ────────────────────────────────────────────
+
+  /**
+   * Estimate fee APR for a position given pool parameters.
+   * Uses: APR = (dailyVolume × feeRate × positionShare) / positionValue × 365
+   */
+  static estimateFeeAPR(params: {
+    volume24hUsd: number;
+    feeRate: number; // e.g. 3000 = 0.30%
+    positionLiqidity: bigint;
+    poolLiquidity: bigint;
+    positionValueUsd: number;
+  }): number {
+    const { volume24hUsd, feeRate, positionLiqidity, poolLiquidity, positionValueUsd } = params;
+    if (positionValueUsd === 0 || poolLiquidity === 0n) return 0;
+    const feePercent = feeRate / 1_000_000;
+    const share = Number(positionLiqidity) / Number(poolLiquidity);
+    const dailyFees = volume24hUsd * feePercent * share;
+    return (dailyFees / positionValueUsd) * 365 * 100; // percent
+  }
+
+  /**
+   * Estimate reward APR for a position given reward emission data.
+   * rewardPerSecond is the emission rate (raw units per second).
+   */
+  static estimateRewardAPR(params: {
+    rewardPerSecond: bigint;
+    rewardDecimals: number;
+    rewardPriceUsd: number;
+    positionLiquidity: bigint;
+    poolLiquidity: bigint;
+    positionValueUsd: number;
+  }): number {
+    const { rewardPerSecond, rewardDecimals, rewardPriceUsd, positionLiquidity, poolLiquidity, positionValueUsd } = params;
+    if (positionValueUsd === 0 || poolLiquidity === 0n) return 0;
+    const dailyReward = Number(rewardPerSecond) * 86400 / (10 ** rewardDecimals);
+    const dailyRewardUsd = dailyReward * rewardPriceUsd;
+    const share = Number(positionLiquidity) / Number(poolLiquidity);
+    return (dailyRewardUsd * share / positionValueUsd) * 365 * 100;
   }
 
   // ─── View Methods (on-chain simulation) ──────────────────────

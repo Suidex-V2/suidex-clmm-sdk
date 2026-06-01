@@ -130,9 +130,31 @@ export interface AddLiquiditySingleSidedParams {
   slippageBps?: bigint;
 }
 
+export interface IndexerPool {
+  poolId: string;
+  tokenXType: string;
+  tokenYType: string;
+  feeRate: number;
+  tickSpacing: number;
+  sqrtPrice: bigint;
+  liquidity: bigint;
+  tickIndex: number;
+  tvlUsd: number;
+  volume24hUsd: number;
+  approved: boolean;
+}
+
+export interface TickData {
+  tickLower: number;
+  tickUpper: number;
+  netLiquidity: bigint;
+}
+
 export interface SuiDexSDKOptions<Name = 'suidex'> {
   name?: Name;
   /** Override package IDs (for testnet or custom deployments) */
   packageId?: string;
   versionId?: string;
+  /** SuiDex V3 indexer API URL. Defaults to https://dex.suidex.org */
+  apiUrl?: string;
 }

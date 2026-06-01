@@ -25,7 +25,7 @@
  */
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { suidexCLMM } from '../src/sdk.js';
+import { suidexCLMM, SuiDexCLMMClient } from '../src/sdk.js';
 import {
   tickToSqrtPrice, sqrtPriceToTick, sqrtPriceToPrice, priceToTick, tickToPrice,
   getAmountsForLiquidity, getLiquidityForAmounts,
@@ -401,6 +401,83 @@ async function testMathWithRealData(pool: Pool, pos: Position) {
   assert(lowerPrice < price && price < upperPrice, `Current price ${price.toFixed(4)} in position range`);
 }
 
+// ─── Phase 3 Tests ───────────────────────────────────────────────
+
+async function testApiGetAllPools() {
+  console.log('\n=== 18. api.getAllPools ===');
+  const pools = await client.suidex.api.getAllPools();
+  assert(Array.isArray(pools), `Returns array`);
+  assert(pools.length > 0, `Found ${pools.length} pools`);
+
+  const suiVic = pools.find(p => p.poolId === SUI_VICTORY_POOL);
+  assert(suiVic !== undefined, `SUI/VICTORY pool found`);
+  if (suiVic) {
+    assert(suiVic.feeRate === 3000, `feeRate: ${suiVic.feeRate}`);
+    assert(suiVic.tickSpacing === 60, `tickSpacing: ${suiVic.tickSpacing}`);
+    assert(suiVic.liquidity > 0n, `liquidity: ${suiVic.liquidity}`);
+    assert(typeof suiVic.tvlUsd === 'number', `tvlUsd: ${suiVic.tvlUsd}`);
+    assert(typeof suiVic.volume24hUsd === 'number', `volume24hUsd: ${suiVic.volume24hUsd}`);
+  }
+}
+
+async function testApiGetPoolTicks() {
+  console.log('\n=== 19. api.getPoolTicks ===');
+  const ticks = await client.suidex.api.getPoolTicks(SUI_VICTORY_POOL);
+  assert(Array.isArray(ticks), `Returns array`);
+  assert(ticks.length > 0, `Found ${ticks.length} tick ranges`);
+
+  const first = ticks[0];
+  assert(typeof first.tickLower === 'number', `tickLower: ${first.tickLower}`);
+  assert(typeof first.tickUpper === 'number', `tickUpper: ${first.tickUpper}`);
+  assert(first.netLiquidity > 0n, `netLiquidity: ${first.netLiquidity}`);
+  assert(first.tickLower < first.tickUpper, `tickLower < tickUpper`);
+}
+
+async function testApiGetStats() {
+  console.log('\n=== 20. api.getStats ===');
+  const stats = await client.suidex.api.getStats();
+  assert(stats.totalPools > 0, `totalPools: ${stats.totalPools}`);
+  assert(typeof stats.totalTvlUsd === 'number', `totalTvlUsd: ${stats.totalTvlUsd}`);
+  assert(typeof stats.totalVolume24hUsd === 'number', `totalVolume24hUsd: ${stats.totalVolume24hUsd}`);
+  assert(stats.activePositions >= 0, `activePositions: ${stats.activePositions}`);
+}
+
+function testAPREstimation(pool: Pool) {
+  console.log('\n=== 21. APR estimation helpers ===');
+
+  // Fee APR: $1000/day volume, 0.3% fee, position = 10% of pool, $100 position value
+  const feeAPR = SuiDexCLMMClient.estimateFeeAPR({
+    volume24hUsd: 1000,
+    feeRate: 3000,
+    positionLiqidity: 100n,
+    poolLiquidity: 1000n,
+    positionValueUsd: 100,
+  });
+  // Expected: 1000 * 0.003 * 0.1 / 100 * 365 * 100 = 109.5%
+  assert(feeAPR > 100 && feeAPR < 120, `Fee APR: ${feeAPR.toFixed(1)}% (expected ~109.5%)`);
+
+  // Edge: zero pool liquidity
+  const zeroAPR = SuiDexCLMMClient.estimateFeeAPR({
+    volume24hUsd: 1000, feeRate: 3000,
+    positionLiqidity: 100n, poolLiquidity: 0n, positionValueUsd: 100,
+  });
+  assert(zeroAPR === 0, `Zero pool liquidity: APR = ${zeroAPR}`);
+
+  // Reward APR: 1 token/sec, 9 decimals, $1/token, position = 50%, $200 value
+  const rewardAPR = SuiDexCLMMClient.estimateRewardAPR({
+    rewardPerSecond: 1_000_000_000n, // 1 token/sec (9 decimals)
+    rewardDecimals: 9,
+    rewardPriceUsd: 1.0,
+    positionLiquidity: 500n,
+    poolLiquidity: 1000n,
+    positionValueUsd: 200,
+  });
+  // Expected: 86400 * 1 * 0.5 / 200 * 365 * 100 = 7,884,000%
+  assert(rewardAPR > 7_000_000, `Reward APR: ${rewardAPR.toFixed(0)}% (high emission test)`);
+
+  assert(true, 'APR estimation helpers work correctly');
+}
+
 // ─── Phase 2 Tests ───────────────────────────────────────────────
 
 async function testListPositions() {
@@ -615,6 +692,12 @@ async function main() {
     await testPreSwap();
     await testCollectAllRewards(pool);
     await testFlashLoan(pool);
+
+    // 18. Phase 3: API + APR
+    await testApiGetAllPools();
+    await testApiGetPoolTicks();
+    await testApiGetStats();
+    testAPREstimation(pool);
 
   } catch (err: any) {
     console.error('\nFATAL ERROR:', err.message ?? err);

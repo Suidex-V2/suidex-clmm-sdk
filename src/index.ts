@@ -32,8 +32,26 @@ export type {
   CollectRewardParams,
   FlashLoanParams,
   AddLiquiditySingleSidedParams,
+  IndexerPool,
+  TickData,
   SuiDexSDKOptions,
 } from './types.js';
+
+// Events (for indexer consumers)
+export {
+  EVENT_TYPES,
+} from './events.js';
+export type {
+  SwapEvent,
+  OpenPositionEvent,
+  ClosePositionEvent,
+  AddLiquidityEvent,
+  RemoveLiquidityEvent,
+  FeeCollectedEvent,
+  CollectPoolRewardEvent,
+  FlashLoanEvent,
+  PoolCreatedEvent,
+} from './events.js';
 
 // Math utilities
 export {
